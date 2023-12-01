@@ -1,0 +1,42 @@
+library(xgboost)
+
+crop <- read.csv("C:/Users/lucas/OneDrive - The Pennsylvania State University/Crop_Precipitation.csv")
+
+#Create quartiles
+Value_quartiles <- cut(crop$Value, 
+                       breaks = quantile(crop$Value, probs = 0:4/4, na.rm = TRUE), 
+                       include.lowest = TRUE, 
+                       labels = c(0, 1, 2, 3))
+
+crop$Quartile <- Value_quartiles
+crop$Quartile <- as.numeric(as.factor(crop$Quartile)) -1
+
+#Create test and train
+train_index <- sample(1:nrow(crop), size = round(0.8 * nrow(crop)))
+test_index <- setdiff(1:nrow(crop), train_index) # Get indices for test set
+train_data <- crop[train_index, ]
+test_data <- crop[test_index, ]
+
+# Preparing matrices for xgboost
+train_matrix <- xgb.DMatrix(data.matrix(train_data[, -which(names(train_data) == "Quartile")]), label = as.numeric(train_data$Quartile))
+test_matrix <- xgb.DMatrix(data.matrix(test_data[, -which(names(test_data) == "Quartile")]))
+
+#XGBoost parameters for a multi-class classification
+params <- list(
+  objective = "multi:softprob",
+  num_class = 4,
+  eval_metric = "mlogloss"
+)
+
+#Training the model
+xgb_model <- xgb.train(params = params, data = train_matrix, nrounds = 100)
+
+#Predicting and evaluating
+predictions <- predict(xgb_model, test_matrix)
+num_test_obs <- nrow(test_data)
+prediction_matrix <- matrix(predictions, nrow = num_test_obs, byrow = TRUE)
+predicted_classes <- max.col(prediction_matrix) - 1
+
+#Accuracy
+accuracy <- sum(predicted_classes == test_data$Quartile) / num_test_obs
+print(accuracy)
