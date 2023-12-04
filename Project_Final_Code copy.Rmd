@@ -1,0 +1,154 @@
+---
+title: "DS 320 Project"
+author: "Chase Cunningham"
+date: "2023-12-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+rm(list = ls())
+
+# Libraries
+library(tidyverse)
+library(readxl)
+library(data.table)
+library(writexl)
+library(xgboost)
+```
+
+```{r}
+#bring in data
+Crop <- read_csv("FAOSTAT_data_en_12-3-2023.csv")
+precipitation_start <- read_excel("API_AG.LND.PRCP.MM_DS2_en_csv_v.xlsx")
+precip_anomaly <- read_csv("global-precipitation-anomaly.csv")
+```
+
+
+```{r}
+#select top 10 crops
+Top10 <- Crop %>% 
+  group_by(Item) %>%
+  summarize(Yield_Sum = sum(Value)) 
+
+Top10 <- Top10 %>%
+  arrange(desc(Yield_Sum)) 
+
+Top10 <- head(Top10, 10)
+
+selected_crops <- list()
+
+for (x in 1:10) {
+  selected_crops <- rbind(selected_crops, c(Top10$Item[x]))
+}
+  
+#reduce data to top 10 crops
+Crop <- as.data.frame(Crop)
+Crop <- Crop [Crop$Item %in% selected_crops, ]
+
+#select necessary columns
+columns <-c("Area","Item","Year","Unit","Value")
+Crop <- Crop[, columns]
+```
+
+
+```{r}
+#begin normalizing data
+
+#find range
+range <- max(precip_anomaly[4]) - min(precip_anomaly[4])
+
+#scale data by dividing it by range
+precip_anomaly$normalized_anomaly <- precip_anomaly[4] / range
+precip_anomaly <- subset(precip_anomaly, Year > 1999)
+precip_anomaly <- precip_anomaly[, c("Year" ,"normalized_anomaly")]
+
+#add 1 so that we can simply multiply it throughout our precipitation data
+precip_anomaly$normalized_anomaly <- precip_anomaly$normalized_anomaly + 1
+
+#subset to the data that needs to be scaled
+precipitation_subset <- precipitation_start[, as.character(seq(2000,2019))]
+
+
+precip_anomaly$Year <- as.character(precip_anomaly$Year)
+
+precip_anomaly_t <- t(precip_anomaly[, 2])
+```
+
+
+```{r}
+for (x in 1:20){
+  precipitation_subset[x] <-precipitation_subset[x] * precip_anomaly_t[x]
+}
+
+Precipitation <- cbind(precipitation_start[1],precipitation_start[2],precipitation_start[3],precipitation_start[4],precipitation_subset,precipitation_start[25])
+```
+
+
+```{r}
+# Making wide Precipitation data into long data
+long_precip = Precipitation %>% pivot_longer(cols = c("2000", "2001", "2002", "2003", "2004", "2005", "2006", "2007", "2008", "2009", "2010", "2011", "2012", "2013", "2014", "2015", "2016", "2017", "2018", "2019", "2020"),
+                                    names_to = "Year",
+                                    values_to = "Precipitation")
+
+# Making Year a double
+long_precip$Year = as.double(long_precip$Year)
+```
+
+
+```{r}
+# Joining data
+Crop_Precipitation <- inner_join(Crop, long_precip, join_by("Area" == "Country Name", "Year" == "Year"))
+```
+
+
+```{r}
+#write.csv(Crop_Precipitation,"/Users/chasecunningham/Library/CloudStorage/OneDriv#e-ThePennsylvaniaStateUniversity/Classes/Fall 23/DS #320/Project/Crop_Precipitation.csv")
+```
+
+
+```{r}
+#Create quartiles
+Value_quantile <- cut(Crop_Precipitation$Value, 
+                       breaks = quantile(Crop_Precipitation$Value, probs = 0:20/20, na.rm = TRUE), 
+                       include.lowest = TRUE, 
+                       labels = c(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19))
+
+Crop_Precipitation$Quantile <- Value_quantile
+Crop_Precipitation$Quantile <- as.numeric(as.factor(Crop_Precipitation$Quantile)) -1
+
+#Create test and train
+train_index <- sample(1:nrow(Crop_Precipitation), size = round(0.8 * nrow(Crop_Precipitation)))
+test_index <- setdiff(1:nrow(Crop_Precipitation), train_index) # Get indices for test set
+train_data <- Crop_Precipitation[train_index, ]
+test_data <- Crop_Precipitation[test_index, ]
+
+# Preparing matrices for xgboost
+train_matrix <- xgb.DMatrix(data.matrix(train_data[, -which(names(train_data) == "Quantile")]), label = as.numeric(train_data$Quantile))
+test_matrix <- xgb.DMatrix(data.matrix(test_data[, -which(names(test_data) == "Quantile")]))
+
+#XGBoost parameters for a multi-class classification
+params <- list(
+  objective = "multi:softprob",
+  num_class = 20,
+  eval_metric = "mlogloss"
+)
+
+#Training the model
+xgb_model <- xgb.train(params = params, data = train_matrix, nrounds = 100)
+
+#Predicting and evaluating
+predictions <- predict(xgb_model, test_matrix)
+num_test_obs <- nrow(test_data)
+prediction_matrix <- matrix(predictions, nrow = num_test_obs, byrow = TRUE)
+predicted_classes <- max.col(prediction_matrix) - 1
+
+#Accuracy, Precision, and F1 Scores
+accuracy <- sum(predicted_classes == test_data$Quantile) / num_test_obs
+
+print(accuracy)
+```
+
